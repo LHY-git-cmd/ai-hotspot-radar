@@ -1,0 +1,5 @@
+# 固定直接依赖；SQLite 使用 Python 标准库，不需要额外安装。
+streamlit==1.66.1
+requests==2.34.2
+python-dotenv==1.2.4
+pytest==9.2.0
