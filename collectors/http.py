@@ -15,7 +15,8 @@ def get_json(url: str, *, source: str, headers: dict | None = None,
     try:
         response = requests.get(
             url, params=params, headers={'User-Agent': USER_AGENT, **(headers or {})},
-            timeout=(5, 15),  # 分别限制连接和单次读取等待时间，避免刷新无限等待。
+            # 为较慢的连接及代理握手留出余量；连接与单次读取仍各限 15 秒。
+            timeout=(15, 15),
         )
     except requests.Timeout:
         raise CollectionError(f'{source} 请求超时，请稍后重试或检查网络。') from None

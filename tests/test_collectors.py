@@ -36,7 +36,27 @@ def test_github_maps_real_fields_and_request(monkeypatch):
     kwargs = get.call_args.kwargs
     assert 'pushed:>=2026-01-03' in kwargs['params']['q']
     assert kwargs['headers']['Authorization'] == 'Bearer test-only-token'
-    assert kwargs['timeout'] == (5, 15)
+    assert kwargs['timeout'] == (15, 15)
+
+
+def test_slow_connection_can_complete_without_retry(monkeypatch):
+    """模拟约 6.7 秒连接准备时间，回归此前 5 秒窗口过早超时的问题。"""
+    from collectors.http import get_json
+    fake = response({'ok': True})
+
+    def slow_connection(url, **kwargs):
+        """不实际等待；按请求传入的连接预算决定连接是否能完成。"""
+        connect_timeout, read_timeout = kwargs['timeout']
+        assert 0 < connect_timeout <= 15 and read_timeout == 15
+        if connect_timeout < 6.7:
+            raise requests.ReadTimeout('代理连接准备超过连接预算')
+        return fake
+
+    get = Mock(side_effect=slow_connection)
+    monkeypatch.setattr('collectors.http.requests.get', get)
+    assert get_json('https://api.github.com', source='GitHub') == {'ok': True}
+    get.assert_called_once()
+    fake.close.assert_called_once()
 
 
 @pytest.mark.parametrize(('status', 'message'), [(401, '认证'), (403, '限流'),
@@ -53,6 +73,8 @@ def test_http_errors_are_clear_and_do_not_expose_token(monkeypatch, status, mess
 
 
 @pytest.mark.parametrize('failure', [requests.Timeout('secret'),
+                                     requests.ConnectTimeout('secret'),
+                                     requests.ReadTimeout('secret'),
                                      requests.ConnectionError('secret'), ValueError('secret')])
 def test_network_and_json_errors(monkeypatch, failure):
     """超时、连接错误和无效 JSON 转换成可展示的中文异常。"""
