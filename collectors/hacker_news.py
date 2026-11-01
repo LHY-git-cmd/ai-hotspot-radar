@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import re
 
 from collectors.http import CollectionError, get_json
-from models import CollectionResult, Hotspot, as_score, as_utc_iso
+from models import CollectionResult, Hotspot, as_score, as_utc_iso, utc_now
 from services.normalization import normalize_url, plain_text
 
 BASE_URL = 'https://hacker-news.firebaseio.com/v0'
@@ -19,18 +19,20 @@ AI_TERMS = re.compile(
 )
 
 
-def _fetch_item(item_id: int) -> tuple[object, str | None]:
+def _fetch_item(item_id: int) -> tuple[object, str | None, str]:
     """将单条请求错误作为结果返回，保留其他帖子处理机会。"""
     try:
-        return get_json(f'{BASE_URL}/item/{item_id}.json', source='Hacker News'), None
+        payload = get_json(f'{BASE_URL}/item/{item_id}.json', source='Hacker News')
+        return payload, None, utc_now()
     except CollectionError as error:
-        return None, str(error)
+        return None, str(error), utc_now()
 
 
 def collect(*, now: datetime | None = None, sample_size: int = 60) -> CollectionResult:
     """最多读取 60 条热门帖详情，用 6 个并发请求控制刷新等待时间。"""
     if not 1 <= sample_size <= 60:
         raise ValueError('Hacker News 样本数量应在 1 到 60 之间')
+    supplied_now = now
     now = now or datetime.now(timezone.utc)
     ids = get_json(f'{BASE_URL}/topstories.json', source='Hacker News')
     if not isinstance(ids, list) or any(type(item) is not int or item <= 0 for item in ids):
@@ -42,7 +44,7 @@ def collect(*, now: datetime | None = None, sample_size: int = 60) -> Collection
     # executor.map 保留热门列表顺序，避免并发完成顺序影响首次去重保留对象。
     with ThreadPoolExecutor(max_workers=6) as executor:
         details = list(executor.map(_fetch_item, ids[:sample_size]))
-    for payload, error in details:
+    for requested_id, (payload, error, observed_at) in zip(ids[:sample_size], details):
         if error:
             errors.append(error)
             continue
@@ -62,7 +64,7 @@ def collect(*, now: datetime | None = None, sample_size: int = 60) -> Collection
         else:
             unknown_time += 1
         item_id = payload.get('id')
-        if type(item_id) is not int or item_id <= 0:
+        if type(item_id) is not int or item_id <= 0 or item_id != requested_id:
             invalid += 1
             continue
         # 自问自答类帖子没有外链时，提供真实的 HN 原讨论链接。
@@ -74,8 +76,10 @@ def collect(*, now: datetime | None = None, sample_size: int = 60) -> Collection
             continue
         result.items.append(Hotspot(
             title=title, url=url, source='Hacker News', summary=text or None,
-            published_at=published, collected_at=now.astimezone(timezone.utc).isoformat(timespec='seconds'),
+            published_at=published, collected_at=(supplied_now.astimezone(timezone.utc).isoformat(timespec='seconds')
+                                                if supplied_now else observed_at),
             score=as_score(payload.get('score')), category='AI 讨论',
+            source_key=str(item_id), comments=as_score(payload.get('descendants')),
         ))
     if len(errors) == len(details):
         raise CollectionError(f'Hacker News 热门帖详情全部请求失败：{errors[0]}')

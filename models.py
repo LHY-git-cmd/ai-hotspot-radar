@@ -46,6 +46,10 @@ class Hotspot:
     published_at: str | None = None
     collected_at: str = field(default_factory=utc_now)
     score: int | None = None
+    source_key: str | None = None
+    forks: int | None = None
+    comments: int | None = None
+    pushed_at: str | None = None
 
 
 @dataclass
@@ -63,6 +67,7 @@ class SaveResult:
     inserted: int = 0
     updated: int = 0
     skipped: int = 0
+    snapshots: int = 0
 
 
 @dataclass
