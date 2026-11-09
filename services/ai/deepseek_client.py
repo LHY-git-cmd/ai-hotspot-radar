@@ -11,15 +11,16 @@ from services.ai.schemas import provider_schema
 TOOL_NAME = 'submit_topic_analysis'
 
 
-def request_body(settings: AISettings, messages: list[dict]) -> dict:
+def request_body(settings: AISettings, messages: list[dict], *, schema=None, tool_name=TOOL_NAME,
+                 description='提交完整的热点解读与恰好三个不同的视频角度') -> dict:
     """仅注册一个结果提交工具，不向模型暴露执行、网络或文件工具。"""
     body = {'model': settings.model, 'messages': messages, 'stream': False,
             'thinking': {'type': 'disabled'}, 'max_tokens': settings.max_output_tokens}
     if settings.output_mode == 'strict':
-        body['tools'] = [{'type': 'function', 'function': {'name': TOOL_NAME,
-            'description': '提交完整的热点解读与恰好三个不同的视频角度',
-            'strict': True, 'parameters': provider_schema()}}]
-        body['tool_choice'] = {'type': 'function', 'function': {'name': TOOL_NAME}}
+        body['tools'] = [{'type': 'function', 'function': {'name': tool_name,
+            'description': description,
+            'strict': True, 'parameters': provider_schema(schema)}}]
+        body['tool_choice'] = {'type': 'function', 'function': {'name': tool_name}}
     else:
         body['response_format'] = {'type': 'json_object'}
     return body
@@ -30,16 +31,19 @@ class DeepSeekProvider:
 
     name = 'deepseek'
 
-    def __init__(self, settings: AISettings):
+    def __init__(self, settings: AISettings, *, schema=None, tool_name=TOOL_NAME,
+                 description='提交完整的热点解读与恰好三个不同的视频角度'):
         """冻结该请求的模型配置，不记录密钥。"""
         self.settings = settings
+        self.schema, self.tool_name, self.description = schema, tool_name, description
 
     def complete(self, messages: list[dict]) -> ProviderReply:
         """保存可得 usage，即使内容截断、JSON 错误或返回 HTTP 错误。"""
         self.settings.validate()
         if not self.settings.api_key:
             raise AIError('configuration', '未配置 DEEPSEEK_API_KEY，原有功能和 AI 历史仍可使用。')
-        body = request_body(self.settings, messages)
+        body = request_body(self.settings, messages, schema=self.schema, tool_name=self.tool_name,
+                            description=self.description)
         if len(json.dumps(body, ensure_ascii=False).encode('utf-8')) > self.settings.max_request_bytes:
             raise AIError('input_limit', '分析材料超过输入限制，请缩短材料或调整配置。')
         endpoint = 'https://api.deepseek.com/' + ('beta/' if self.settings.output_mode == 'strict' else '')
@@ -74,21 +78,28 @@ class DeepSeekProvider:
                 raise AIError(kind, message, retryable=retryable, usage=usage,
                               retry_after=min(float(wait), 30) if wait.isdecimal() else None)
             try:
+                parse_code = 'response_shape'
                 choice = payload['choices'][0]
                 if choice['finish_reason'] == 'length':
-                    raise AIError('truncated', 'AI 输出被截断，未保存成功分析；已有 Token 仍计入估算。', usage=usage)
+                    raise AIError('truncated', 'AI 输出被截断，未保存成功分析；已有 Token 仍计入估算。', usage=usage,
+                                  diagnostic={'code': 'output_truncated'})
                 if self.settings.output_mode == 'strict':
+                    parse_code = 'tool_shape'
                     calls = choice['message']['tool_calls']
-                    if len(calls) != 1 or calls[0]['function']['name'] != TOOL_NAME:
+                    if len(calls) != 1 or calls[0]['function']['name'] != self.tool_name:
+                        parse_code = 'tool_mismatch'
                         raise ValueError('无效工具结果')
                     content = calls[0]['function']['arguments']
                 else:
                     content = choice['message']['content']
+                parse_code = 'json_decode'
                 document = json.loads(content)
                 if not isinstance(document, dict):
+                    parse_code = 'document_type'
                     raise ValueError('不是 JSON 对象')
                 return ProviderReply(document, usage, payload.get('model'))
             except (KeyError, IndexError, TypeError, ValueError):
-                raise AIError('invalid_response', 'AI 返回空内容或无效 JSON，未保存成功分析。', usage=usage) from None
+                raise AIError('invalid_response', 'AI 返回空内容或无效 JSON，未保存成功分析。', usage=usage,
+                              diagnostic={'code': parse_code}) from None
         finally:
             response.close()

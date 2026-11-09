@@ -40,10 +40,11 @@ def estimate_units(usage: Usage, settings: AISettings) -> int | None:
     return to_units(amount)
 
 
-def reservation_units(messages: list[dict], settings: AISettings) -> int:
+def reservation_units(messages: list[dict], settings: AISettings, *, body: dict | None = None) -> int:
     """按完整请求 UTF-8 字节数及输出上限预占，给包装计量留保守余量。"""
     from services.ai.deepseek_client import request_body
-    size = len(json.dumps(request_body(settings, messages), ensure_ascii=False).encode('utf-8'))
+    size = len(json.dumps(request_body(settings, messages) if body is None else body,
+                          ensure_ascii=False).encode('utf-8'))
     if size > settings.max_request_bytes:
         raise ValueError('分析材料超过输入体积上限')
     # 将每个输入字节都按一个 Token 计费，并额外留4096 Token余量；不是实际 Token 数。

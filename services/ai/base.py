@@ -39,11 +39,12 @@ class AIError(Exception):
     """可展示的固定错误信息，记录费用信息但不携带远程异常正文。"""
 
     def __init__(self, kind: str, message: str, *, retryable: bool = False,
-                 usage: Usage | None = None, retry_after: float | None = None):
+                 usage: Usage | None = None, retry_after: float | None = None, diagnostic=None):
         """重试由预算编排层控制，Provider 内不得隐式重试。"""
         super().__init__(message)
         self.kind, self.retryable = kind, retryable
         self.usage, self.retry_after = usage or Usage(), retry_after
+        self.diagnostic = diagnostic
 
 
 class Provider(Protocol):

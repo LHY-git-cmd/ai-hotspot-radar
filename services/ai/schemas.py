@@ -42,7 +42,7 @@ ANALYSIS_SCHEMA = _object({
 })
 
 
-def provider_schema() -> dict:
+def provider_schema(schema: dict | None = None) -> dict:
     """移除 DeepSeek strict 尚不支持的长度参数，保留本地完整校验。"""
     def compatible(value):
         """递归转换副本，不修改本地用于验证的 Schema。"""
@@ -52,7 +52,7 @@ def provider_schema() -> dict:
         if isinstance(value, list):
             return [compatible(item) for item in value]
         return value
-    return compatible(ANALYSIS_SCHEMA)
+    return compatible(ANALYSIS_SCHEMA if schema is None else schema)
 
 
 def validate_analysis(document: object) -> dict:

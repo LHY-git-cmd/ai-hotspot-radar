@@ -7,9 +7,9 @@ import time
 from copy import deepcopy
 
 from database.ai_store import AIStore
-from services.ai.base import AIError, Provider, Usage
+from services.ai.base import AIError, Provider
 from services.ai.config import AISettings, ANALYSIS_VERSION, PROMPT_VERSION, SCHEMA_VERSION
-from services.ai.cost_tracker import estimate_units, reservation_units, price_snapshot
+from services.ai.cost_tracker import reservation_units
 from services.ai.prompts import build_messages
 from services.ai.schemas import validate_analysis
 from services.ranking import rank_items, score_needs_refresh
@@ -106,35 +106,18 @@ class Analyzer:
             if claimed.get('reused_action'):
                 return dict(status='pending' if claimed['status'] == 'running' else 'failed',
                             analysis_id=analysis_id, cache_hit=False, error='该确认动作已处理，不会重复调用；请查看历史或费用待确认记录。')
-            for attempt in range(1, self.settings.max_attempts + 1):
-                run_id = self.store.reserve_attempt(analysis_id, attempt, reserved, price_snapshot(self.settings))
-                try:
-                    reply = self.provider.complete(messages)
-                except AIError as error:
-                    self.store.finish_attempt(run_id, 'failed', error.usage,
-                                              estimate_units(error.usage, self.settings), error.kind)
-                    logger.warning('analysis=%d attempt=%d failed type=%s', analysis_id, attempt, error.kind)
-                    if error.retryable and attempt < self.settings.max_attempts:
-                        self.sleep(max(error.retry_after or 0, min(2 ** (attempt - 1), 8)))
-                        continue
-                    raise
-                except Exception as error:
-                    self.store.finish_attempt(run_id, 'failed', Usage(), None, type(error).__name__)
-                    raise AIError('provider_failure', 'AI 调用遇到异常，费用待确认，请查看运行记录。') from None
-                cost = estimate_units(reply.usage, self.settings)
-                try:
-                    document = validate_analysis(reply.document)
-                except ValueError:
-                    self.store.finish_attempt(run_id, 'failed', reply.usage, cost, 'invalid_schema', reply.response_model)
-                    raise AIError('invalid_schema', 'AI 内容未通过三角度结构校验，未保存成功分析；已记录可得用量。') from None
-                self.store.finish_attempt(run_id, 'success', reply.usage, cost, None, reply.response_model)
+            from services.ai.executor import execute_attempts
+
+            def persist(operation_id, attempt_id, document):
                 sparse = not materials['E1_source_text']['summary']
                 evidence = '有限材料：仅有标题，未独立核验' if sparse else '基于所提供材料，未经独立核验'
                 if sparse and len(document['evidence_gaps']) < 12:
                     document['evidence_gaps'].append('客户端提示：仅有标题及公开指标，关键能力和宣传内容都待实际核验。')
-                self.store.complete_analysis(analysis_id, run_id, document, evidence)
-                logger.info('analysis=%d attempt=%d success usage_known=%s', analysis_id, attempt, cost is not None)
-                return dict(status='success', analysis_id=analysis_id, cache_hit=False, error=None)
+                self.store.complete_analysis(operation_id, attempt_id, document, evidence)
+
+            execute_attempts(self.store, self.provider, self.settings, analysis_id, messages, reserved,
+                             validate_analysis, persist, sleep=self.sleep)
+            return dict(status='success', analysis_id=analysis_id, cache_hit=False, error=None)
         except AIError as error:
             if analysis_id is not None:
                 self._record_failure(analysis_id, error.kind)
