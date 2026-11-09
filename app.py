@@ -232,16 +232,28 @@ def show_dashboard(store: HotspotStore, github_token: str) -> None:
         show_record(item, store, position)
 
 
-def main() -> None:
+def main(*, initial_page: str = '热点排行') -> None:
     """初始化中文页面；本地数据库错误也提供清楚提示。"""
     st.set_page_config(page_title='AI 热点雷达', layout='centered')
+    # pages/production.py 复用现有侧栏导航，不显示第二套自动页面菜单。
+    st.set_option('client.showSidebarNavigation', False)
     logger = logging.getLogger('ai_hotspot_radar')
     if not logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
-    page = st.sidebar.radio('功能', ['热点排行', 'AI 选题分析'])
+    pages = ['热点排行', 'AI 选题分析', '视频制作工作台']
+    page = st.sidebar.radio('功能', pages, index=pages.index(initial_page))
+    if page == '视频制作工作台':
+        from pages.production import show_production_page
+        try:
+            show_production_page(load_settings().database_path)
+        except ValueError as error:
+            st.error(f'数据库或配置不可用：{error}')
+        except (sqlite3.Error, OSError):
+            st.error('制作数据库暂不可用，请检查写入权限、磁盘空间或锁定状态；未完成的操作已回滚。')
+        return
     if page == 'AI 选题分析':
         from ai_page import show_ai_page
         try:

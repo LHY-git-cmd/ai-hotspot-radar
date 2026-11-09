@@ -1,15 +1,25 @@
-"""可备份、可重入的 SQLite 增量迁移，保留前两期全部数据。"""
+"""可备份、可重入的 SQLite 增量迁移，保留已有业务数据。"""
 
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
+
+
+def _backup_database(path: Path, backup_path: Path) -> None:
+    """由另一只读连接备份；调用者持有写锁，不能在写事务连接上调用 backup。"""
+    source = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)
+    try:
+        with sqlite3.connect(backup_path) as destination:
+            source.backup(destination)
+    finally:
+        source.close()
 
 
 def migrate(connection: sqlite3.Connection, path: Path, *, backup_existing: bool) -> None:
-    """迁移前保存一致备份，v0→v2→v3 在同一事务完成。"""
+    """先锁定写入并备份，v0/v2/v3/v4/v5→v6 在同一事务完成。"""
     version = connection.execute('PRAGMA user_version').fetchone()[0]
     if version > SCHEMA_VERSION:
         raise ValueError(f'数据库版本为 {version}，当前程序支持至 {SCHEMA_VERSION}。'
@@ -17,24 +27,33 @@ def migrate(connection: sqlite3.Connection, path: Path, *, backup_existing: bool
                          '否则请使用兼容版本程序。')
     if version == SCHEMA_VERSION:
         return
-    if version not in (0, 2):
+    if version not in (0, 2, 3, 4, 5):
         raise ValueError('不支持的数据库版本，未执行迁移')
-    if backup_existing:
-        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-        backup_path = path.with_name(f'{path.stem}.pre-v3-{stamp}-{uuid4().hex[:8]}.sqlite3')
-        with sqlite3.connect(backup_path) as destination:
-            connection.backup(destination)
     with connection:
         connection.execute('BEGIN IMMEDIATE')
         current = connection.execute('PRAGMA user_version').fetchone()[0]
         if current == SCHEMA_VERSION:
             return
-        if current not in (0, 2):
+        if current not in (0, 2, 3, 4, 5):
             raise ValueError('迁移期间数据库版本发生变化')
+        # 在创建任何新表之前备份；写锁防止备份与升级之间插入其他写入。
+        if backup_existing:
+            stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            backup_path = path.with_name(f'{path.stem}.pre-v6-{stamp}-{uuid4().hex[:8]}.sqlite3')
+            _backup_database(path, backup_path)
         if current == 0:
             _upgrade_v2(connection)
-        from database.ai_migration import create_ai_tables
-        create_ai_tables(connection)
+        if current in (0, 2):
+            from database.ai_migration import create_ai_tables
+            create_ai_tables(connection)
+        if current in (0, 2, 3):
+            from database.production_migration import create_production_tables
+            create_production_tables(connection)
+        if current in (0, 2, 3, 4):
+            from database.research_migration import create_research_tables
+            create_research_tables(connection)
+        from database.research_quality_migration import create_research_quality_tables
+        create_research_quality_tables(connection)
         connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
 
 

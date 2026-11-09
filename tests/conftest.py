@@ -3,6 +3,42 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_configuration(monkeypatch, tmp_path):
+    """测试只读显式假配置；禁止 dotenv、真实 HTTP 和生产数据目录连接。"""
+    import dotenv
+    import sqlite3
+    from pathlib import Path
+    import config
+    import services.ai.config as ai_config
+
+    monkeypatch.setattr(dotenv, 'load_dotenv', lambda *a, **k: False)
+    monkeypatch.setattr(config, 'load_dotenv', lambda *a, **k: False)
+    monkeypatch.setattr(ai_config, 'load_dotenv', lambda *a, **k: False)
+    import os
+    for name in tuple(os.environ):
+        if name.startswith(('AI_', 'DEEPSEEK_', 'TAVILY_')) or name == 'GITHUB_TOKEN':
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('AI_RADAR_DB_PATH', str(tmp_path / 'isolated-default.sqlite3'))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError('测试禁止真实网络，请使用 Mock Provider')
+
+    monkeypatch.setattr('requests.sessions.Session.request', no_network)
+    original_connect = sqlite3.connect
+    production_dir = (Path(__file__).resolve().parents[1] / 'data').resolve()
+
+    def temporary_database(database, *args, **kwargs):
+        value = str(database)
+        from urllib.parse import unquote, urlsplit
+        path = unquote(urlsplit(value).path).lstrip('/') if value.startswith('file:') else value
+        if production_dir == Path(path).resolve() or production_dir in Path(path).resolve().parents:
+            raise AssertionError('测试禁止连接生产数据库')
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, 'connect', temporary_database)
+
+
 @pytest.fixture
 def ai_document():
     """提供一个符合三角度 Schema 的测试文档，不声称来自真实模型。"""
@@ -24,3 +60,23 @@ def ai_document():
              'risks': ['需要核实功能，不能声称已完成测试']}
             for kind in ('实测型', '教程型', '对比型')],
     }
+
+
+@pytest.fixture
+def production_store(tmp_path, ai_document):
+    """准备真实第三期结构的临时库；只写模拟分析，不调用 Provider。"""
+    from database.ai_store import AIStore
+    from database.production_store import ProductionStore
+    from models import Hotspot
+    from services.ai.base import Usage
+    from services.ai.config import AISettings
+
+    path = tmp_path / 'production.sqlite3'
+    ai = AIStore(path, AISettings())
+    ai.save([Hotspot(title='测试热点', url='https://example.com/production',
+                    source='GitHub', category='AI', collected_at='2026-11-01T00:00:00+00:00')])
+    analysis = ai.claim_analysis(1, 'fixture', 'fixture', {}, 'test', False)
+    run_id = ai.reserve_attempt(analysis['id'], 1, 1, {})
+    ai.finish_attempt(run_id, 'success', Usage(1, 1), 1, None)
+    ai.complete_analysis(analysis['id'], run_id, ai_document, '仅测试材料')
+    return ProductionStore(path)

@@ -185,6 +185,8 @@ def show_usage_history(store: AIStore) -> None:
         runs = store.runs()
         if runs:
             st.dataframe([{'调用 ID': row['id'], '分析 ID': row['analysis_id'], '尝试': row['attempt'],
+                '用途': {'topic': '视频选题分析', 'research_plan': '研究计划', 'research_evidence': '研究证据', 'research_report': '研究报告'}.get(row['purpose'], row['purpose']),
+                '制作任务 ID': str(row['production_project_id']) if row['production_project_id'] is not None else '无',
                 '模型': row['model'], '状态': row['status'], '错误类型': row['error_type'] or '无',
                 '输入 Token': str(row['input_tokens']) if row['input_tokens'] is not None else '未知',
                 '输出 Token': str(row['output_tokens']) if row['output_tokens'] is not None else '未知',

@@ -24,14 +24,14 @@ def migrate(connection, path, *, backup_existing):
     reopened = storage.HotspotStore(path)
     assert reopened.count() == 0
     with sqlite3.connect(path) as connection:
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 6
 
 
-def test_latest_schema_is_v3_and_v2_rows_survive(tmp_path):
+def test_latest_schema_is_v6_and_v2_rows_survive(tmp_path):
     """从明确的二期结构升级，不能修改评分或补造 AI 分析。"""
     from database.migrations import SCHEMA_VERSION, _upgrade_v2
     from database.store import HotspotStore
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 6
     path = tmp_path / 'v2.sqlite3'
     with sqlite3.connect(path) as connection:
         connection.execute('''CREATE TABLE hotspots (
@@ -44,14 +44,14 @@ def test_latest_schema_is_v3_and_v2_rows_survive(tmp_path):
         before = connection.execute('SELECT * FROM hotspots').fetchall()
     store = HotspotStore(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 6
         assert connection.execute('SELECT * FROM hotspots').fetchall() == before
         assert connection.execute('SELECT COUNT(*) FROM topic_analyses').fetchone()[0] == 0
         assert not connection.execute('PRAGMA foreign_key_check').fetchall()
-    backups = list(tmp_path.glob('v2.pre-v3-*.sqlite3'))
+    backups = list(tmp_path.glob('v2.pre-v6-*.sqlite3'))
     assert len(backups) == 1
     HotspotStore(path)
-    assert list(tmp_path.glob('v2.pre-v3-*.sqlite3')) == backups
+    assert list(tmp_path.glob('v2.pre-v6-*.sqlite3')) == backups
 
 
 def test_ddl_failure_rolls_back_v3_and_keeps_backup(tmp_path, monkeypatch):
@@ -76,4 +76,4 @@ def test_ddl_failure_rolls_back_v3_and_keeps_backup(tmp_path, monkeypatch):
             migrate(connection, path, backup_existing=True)
         assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
         assert not connection.execute("SELECT 1 FROM sqlite_master WHERE name='topic_analyses'").fetchone()
-    assert list(tmp_path.glob('failure.pre-v3-*.sqlite3'))
+    assert list(tmp_path.glob('failure.pre-v6-*.sqlite3'))

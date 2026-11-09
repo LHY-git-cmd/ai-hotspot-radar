@@ -65,13 +65,15 @@ class AIStore(HotspotStore):
                                (units, utc_now(), _json(audit)))
 
     def claim_analysis(self, hotspot_id: int, cache_key: str, action_id: str, materials: dict,
-                       analysis_version: str, force: bool, *, provider: str = 'mock') -> dict:
+                       analysis_version: str, force: bool, *, provider: str = 'mock', purpose='topic',
+                       project_id=None, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION) -> dict:
         """获得材料的持久执行锁；成功缓存和同动作重入都不能再次调用。"""
         with self._connection() as connection:
             connection.execute('BEGIN IMMEDIATE')
             previous = connection.execute('SELECT * FROM topic_analyses WHERE action_id=?', (action_id,)).fetchone()
             if previous:
-                if previous['cache_key'] != cache_key or previous['hotspot_id'] != hotspot_id:
+                if (previous['cache_key'] != cache_key or previous['hotspot_id'] != hotspot_id
+                        or previous['purpose'] != purpose or previous['production_project_id'] != project_id):
                     raise AIError('action_conflict', '此确认动作的材料已变化，请重新确认。')
                 return dict(previous) | {'cache_hit': previous['status'] == 'success', 'reused_action': True}
             if not force:
@@ -85,10 +87,10 @@ class AIStore(HotspotStore):
                 raise AIError('in_progress', '相同材料的分析正在进行中或费用状态待确认，请查看调用记录，勿重复提交。')
             cursor = connection.execute('''INSERT INTO topic_analyses
                 (hotspot_id,cache_key,action_id,provider,model,prompt_version,schema_version,
-                 analysis_version,output_mode,input_json,status,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,'running',?)''', (hotspot_id, cache_key, action_id, provider,
-                self.settings.model, PROMPT_VERSION, SCHEMA_VERSION, analysis_version,
-                self.settings.output_mode, _json(materials), utc_now()))
+                 analysis_version,output_mode,input_json,status,created_at,purpose,production_project_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,'running',?,?,?)''', (hotspot_id, cache_key, action_id, provider,
+                self.settings.model, prompt_version, schema_version, analysis_version,
+                self.settings.output_mode, _json(materials), utc_now(), purpose, project_id))
             return {'id': cursor.lastrowid, 'status': 'running', 'cache_hit': False, 'reused_action': False}
 
     def reserve_attempt(self, analysis_id: int, attempt: int, units: int, price: dict,
@@ -138,7 +140,7 @@ class AIStore(HotspotStore):
         document = validate_analysis(document)
         with self._connection() as connection:
             connection.execute('BEGIN IMMEDIATE')
-            row = connection.execute("SELECT * FROM topic_analyses WHERE id=? AND status='running'", (analysis_id,)).fetchone()
+            row = connection.execute("SELECT * FROM topic_analyses WHERE id=? AND status='running' AND purpose='topic'", (analysis_id,)).fetchone()
             run = connection.execute("SELECT id FROM ai_analysis_runs WHERE id=? AND analysis_id=? AND status='success'",
                                      (run_id, analysis_id)).fetchone()
             if not row or not run:
@@ -158,7 +160,7 @@ class AIStore(HotspotStore):
     def analyses(self, hotspot_id: int | None = None) -> list[dict]:
         """只返回真正成功的分析，失败尝试在调用记录中单独展示。"""
         with self._connection() as connection:
-            rows = connection.execute("SELECT * FROM topic_analyses WHERE status='success'"
+            rows = connection.execute("SELECT * FROM topic_analyses WHERE status='success' AND purpose='topic'"
                 + (' AND hotspot_id=?' if hotspot_id is not None else '') + ' ORDER BY id DESC',
                 (hotspot_id,) if hotspot_id is not None else ()).fetchall()
         return [dict(row) | {'document': json.loads(row['analysis_json'])} for row in rows]
@@ -205,7 +207,8 @@ class AIStore(HotspotStore):
     def runs(self) -> list[dict]:
         """读取调用和待确认费用，不包含密钥或原始响应正文。"""
         with self._connection() as connection:
-            return [dict(row) for row in connection.execute('SELECT * FROM ai_analysis_runs ORDER BY id DESC')]
+            return [dict(row) for row in connection.execute('''SELECT r.*,a.purpose,a.production_project_id
+                FROM ai_analysis_runs r JOIN topic_analyses a ON a.id=r.analysis_id ORDER BY r.id DESC''')]
 
     def unresolved(self) -> list[dict]:
         """包括进程中断的 running 记录，不在重启时自动重发。"""
